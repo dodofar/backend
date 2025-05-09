@@ -190,71 +190,75 @@ public class MoveService {
     private List<int[]> dfs(String[][] board, int r, int c,
                             int destR, int destC, String piece,
                             Set<String> used) {
+        // Se raggiungiamo la destinazione, abbiamo trovato un percorso valido
         if (r == destR && c == destC) {
             return new ArrayList<>();
         }
+        
         char pchar = piece.charAt(0);
-        // Directions: four diagonals
         int[][] dirs = new int[][]{{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+        List<int[]> bestPath = null;
 
         for (int[] d : dirs) {
             int dr = d[0], dc = d[1];
+            
             if (Character.isUpperCase(pchar)) {
-                // King: can capture at any distance
-                // scan for opponent piece along direction
+                // Logica per la Dama
                 for (int step = 1; ; step++) {
                     int midR = r + step * dr;
                     int midC = c + step * dc;
                     if (midR < 0 || midR > 7 || midC < 0 || midC > 7) break;
                     String cap = board[midR][midC];
                     if (cap.isEmpty()) continue;
-                    if (cap.equalsIgnoreCase(piece)) break; // own piece
-                    // opponent piece found
-                    // try landing positions beyond
+                    if (cap.equalsIgnoreCase(piece)) break;
+
                     for (int landStep = 1; ; landStep++) {
                         int landR = midR + landStep * dr;
                         int landC = midC + landStep * dc;
                         if (landR < 0 || landR > 7 || landC < 0 || landC > 7) break;
-                        if (!board[landR][landC].isEmpty()) break; // blocked
+                        if (!board[landR][landC].isEmpty()) break;
+                        
                         String key = midR + "," + midC + "->" + landR + "," + landC;
                         if (used.contains(key)) continue;
+                        
                         used.add(key);
                         List<int[]> path = dfs(board, landR, landC, destR, destC, piece, used);
-                        if (path != null) {
-                            List<int[]> full = new ArrayList<>();
-                            full.add(new int[]{midR, midC});
-                            full.addAll(path);
-                            return full;
+                        if (path != null && (bestPath == null || path.size() < bestPath.size())) {
+                            bestPath = new ArrayList<>();
+                            bestPath.add(new int[]{midR, midC});
+                            bestPath.addAll(path);
                         }
                         used.remove(key);
                     }
-                    // only first opponent can be captured
                     break;
                 }
             } else {
-                // Man: only adjacent capture
+                // Logica per pedina normale
                 int midR = r + dr;
                 int midC = c + dc;
                 int landR = r + 2 * dr;
                 int landC = c + 2 * dc;
+                
                 if (landR < 0 || landR > 7 || landC < 0 || landC > 7) continue;
                 String cap = board[midR][midC];
                 if (cap.isEmpty() || cap.equalsIgnoreCase(piece)) continue;
                 if (!board[landR][landC].isEmpty()) continue;
+                
                 String key = midR + "," + midC + "->" + landR + "," + landC;
                 if (used.contains(key)) continue;
+                
                 used.add(key);
                 List<int[]> path = dfs(board, landR, landC, destR, destC, piece, used);
-                if (path != null) {
-                    List<int[]> full = new ArrayList<>();
-                    full.add(new int[]{midR, midC});
-                    full.addAll(path);
-                    return full;
+                if (path != null && (bestPath == null || path.size() < bestPath.size())) {
+                    bestPath = new ArrayList<>();
+                    bestPath.add(new int[]{midR, midC});
+                    bestPath.addAll(path);
                 }
                 used.remove(key);
             }
         }
-        return null;
+        
+        return bestPath;
     }
 
     /**
