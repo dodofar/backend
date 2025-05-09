@@ -10,11 +10,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-
 @Service
 @Transactional
 public class MoveService {
@@ -22,11 +17,9 @@ public class MoveService {
     private GameDao gameDao;
 
     public Game makeMove(String gameId, MoveDto dto) {
-        // Carica partita
+        // Carica partita e valida turno
         Game game = gameDao.findById(gameId)
                 .orElseThrow(() -> new SessionGameNotFoundException(gameId));
-
-        // Validazione player
         if (dto.getPlayer() == null) {
             throw new InvalidMoveException("Player field is required");
         }
@@ -36,7 +29,7 @@ public class MoveService {
         } catch (IllegalArgumentException ex) {
             throw new InvalidMoveException("Invalid player: " + dto.getPlayer());
         }
-        if (!player.equals(game.getTurno())) {
+        if (game.getTurno() != player) {
             throw new InvalidMoveException("Not " + player + "'s turn.");
         }
 
@@ -50,101 +43,141 @@ public class MoveService {
 
         String piece = board[fromR][fromC];
         if (piece.isEmpty()) {
-            throw new InvalidMoveException("No piece at position " + dto.getFrom());
+            throw new InvalidMoveException("No piece at " + dto.getFrom());
         }
-        boolean isWhitePiece = piece.equalsIgnoreCase("w");
-        if ((player == Team.WHITE) != isWhitePiece) {
+        boolean isKing = Character.isUpperCase(piece.charAt(0));
+        boolean isWhite = piece.equalsIgnoreCase("w");
+        if ((player == Team.WHITE) != isWhite) {
             throw new InvalidMoveException("Piece does not belong to player.");
         }
         if (!board[toR][toC].isEmpty()) {
-            throw new InvalidMoveException("Destination " + dto.getTo() + " is not empty.");
+            throw new InvalidMoveException("Destination not empty.");
         }
 
         int dr = toR - fromR;
         int dc = toC - fromC;
+        boolean isCapture = Math.abs(dr) == 2 && Math.abs(dc) == 2;
 
-        // 1) Verifica cattura (anche multipla, anche con cambi di direzione)
-        List<int[]> captured = findCapturePath(board, fromR, fromC, toR, toC, piece);
-        boolean isCapture = captured != null && !captured.isEmpty();
-
-        if (isCapture) {
-            // Rimuovo tutte le pedine intercettate
-            for (int[] pos : captured) {
-                int r = pos[0], c = pos[1];
-                String cap = board[r][c];
-                board[r][c] = "";
-                if (cap.equalsIgnoreCase("w")) {
-                    if (cap.equals("w")) game.setPedineW(game.getPedineW() - 1);
-                    else                game.setDamaW(game.getDamaW() - 1);
-                } else {
-                    if (cap.equals("b")) game.setPedineB(game.getPedineB() - 1);
-                    else                game.setDamaB(game.getDamaB() - 1);
-                }
-            }
-        } else {
-            // 2) Mossa semplice
-            if (Character.isUpperCase(piece.charAt(0))) {
-                // Dama: diagonale libera, lunghezza qualsiasi
-                if (Math.abs(dr) != Math.abs(dc) || dr == 0) {
-                    throw new InvalidMoveException("Invalid simple move for king.");
-                }
-                int stepR = dr / Math.abs(dr), stepC = dc / Math.abs(dc);
-                for (int i = 1; i < Math.abs(dr); i++) {
-                    if (!board[fromR + i*stepR][fromC + i*stepC].isEmpty()) {
-                        throw new InvalidMoveException("Path is blocked for king move.");
-                    }
-                }
-            } else {
-                // Uomo: una sola diagonale avanti
-                if (Math.abs(dr) != 1 || Math.abs(dc) != 1) {
-                    throw new InvalidMoveException("Invalid simple move.");
-                }
-                if (piece.equals("w") && dr != -1) {
-                    throw new InvalidMoveException("White man can only move forward.");
-                }
-                if (piece.equals("b") && dr != 1) {
-                    throw new InvalidMoveException("Black man can only move forward.");
-                }
-            }
+        // Regola presa obbligatoria
+        if (!isCapture && hasAnyCaptures(board, player)) {
+            throw new InvalidMoveException("Capture available, must capture.");
         }
 
-        // 3) Sposta la pedina
+        // Esegui mossa o cattura
+        if (isCapture) {
+            int midR = fromR + dr / 2, midC = fromC + dc / 2;
+            String capturedPiece = board[midR][midC];
+
+            // Verifica che ci sia un pezzo avversario da catturare
+            if (capturedPiece.isEmpty()) {
+                throw new InvalidMoveException("No piece to capture");
+            }
+
+            boolean capturedIsWhite = capturedPiece.equalsIgnoreCase("w");
+            if (isWhite == capturedIsWhite) {
+                throw new InvalidMoveException("Cannot capture your own piece");
+            }
+
+            // Rimuove il pezzo mangiato
+            removePiece(board, midR, midC, game);
+
+            // Sposta il pezzo
+            board[fromR][fromC] = "";
+            board[toR][toC] = piece;
+
+            // Promozione se dovuta
+            if (!isKing && isWhite && toR == 0) {
+                piece = "W"; // Promozione a dama bianca
+                game.setPedineW(game.getPedineW() - 1);
+                game.setDamaW(game.getDamaW() + 1);
+                board[toR][toC] = piece;
+            }
+            if (!isKing && !isWhite && toR == 7) {
+                piece = "B"; // Promozione a dama nera
+                game.setPedineB(game.getPedineB() - 1);
+                game.setDamaB(game.getDamaB() + 1);
+                board[toR][toC] = piece;
+            }
+
+            // Controllo se può ancora catturare
+            if (canStillCapture(board, toR, toC)) {
+                // Non cambiare turno
+                game.getCronologiaMosse().add(dto.getFrom() + "-" + dto.getTo() + "-" + dto.getPlayer());
+                return gameDao.save(game);
+            }
+
+            // Cambio turno e fine partita
+            Team opponent = (player == Team.WHITE ? Team.BLACK : Team.WHITE);
+            game.setTurno(opponent);
+            checkEndGame(game);
+            game.getCronologiaMosse().add(dto.getFrom() + "-" + dto.getTo() + "-" + dto.getPlayer());
+            return gameDao.save(game);
+        } else if (isKing) {
+            validateKingSimpleMove(board, dr, dc);
+        } else {
+            validateManSimpleMove(dr, dc, isWhite);
+        }
+
+        // Sposta il pezzo e promuovi
         board[fromR][fromC] = "";
-        if (piece.equals("w") && toR == 0) {
-            piece = "W";
+        if (!isKing && isWhite && toR == 0) {
+            piece = "W"; // Promozione a dama bianca
             game.setPedineW(game.getPedineW() - 1);
             game.setDamaW(game.getDamaW() + 1);
         }
-        if (piece.equals("b") && toR == 7) {
-            piece = "B";
+        if (!isKing && !isWhite && toR == 7) {
+            piece = "B"; // Promozione a dama nera
             game.setPedineB(game.getPedineB() - 1);
             game.setDamaB(game.getDamaB() + 1);
         }
         board[toR][toC] = piece;
 
-        // 4) Cambio turno
+        // Cambio turno e fine partita
         Team opponent = (player == Team.WHITE ? Team.BLACK : Team.WHITE);
         game.setTurno(opponent);
-
-        // 5) Controllo fine partita per mancanza pedine
-        if (game.getPedineW() + game.getDamaW() == 0) {
-            game.setPartitaTerminata(true);
-            game.setVincitore(Team.BLACK);
-        }
-        if (game.getPedineB() + game.getDamaB() == 0) {
-            game.setPartitaTerminata(true);
-            game.setVincitore(Team.WHITE);
-        }
-
-        // 6) **Nuovo**: controllo se l’opponente ha mosse valide
-        if (!game.isPartitaTerminata() && !hasAnyMoves(board, opponent)) {
-            game.setPartitaTerminata(true);
-            game.setVincitore(player);
-        }
-
+        checkEndGame(game);
 
         game.getCronologiaMosse().add(""+fromR + fromC + "-" + toR + toC + "-" + dto.getPlayer());
         return gameDao.save(game);
+    }
+
+    private boolean canStillCapture(String[][] board, int r, int c) {
+        String piece = board[r][c];
+        if (piece == null || piece.isEmpty()) return false;
+
+        boolean isKing = Character.isUpperCase(piece.charAt(0));
+        boolean isWhite = piece.equalsIgnoreCase("w");
+
+        if (!isKing) {
+            int forwardDir = isWhite ? -1 : 1;
+            int[][] dirs = {{forwardDir, 1}, {forwardDir, -1}};
+
+            for (int[] d : dirs) {
+                int mr = r + d[0], mc = c + d[1];
+                int nr = r + 2 * d[0], nc = c + 2 * d[1];
+                if (mr < 0 || mr > 7 || mc < 0 || mc > 7 || nr < 0 || nr > 7 || nc < 0 || nc > 7) continue;
+                String mid = board[mr][mc];
+                String dst = board[nr][nc];
+                if (mid.isEmpty() || dst == null || !dst.isEmpty()) continue;
+                if (mid.equalsIgnoreCase(piece)) continue;
+                boolean isOpponentPiece = mid.equalsIgnoreCase("w") != isWhite;
+                if (isOpponentPiece) return true;
+            }
+        } else {
+            int[][] dirs = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+            for (int[] d : dirs) {
+                int mr = r + d[0], mc = c + d[1];
+                int nr = r + 2 * d[0], nc = c + 2 * d[1];
+                if (mr < 0 || mr > 7 || mc < 0 || mc > 7 || nr < 0 || nr > 7 || nc < 0 || nc > 7) continue;
+                String mid = board[mr][mc];
+                String dst = board[nr][nc];
+                if (mid.isEmpty() || dst == null || !dst.isEmpty()) continue;
+                if (mid.equalsIgnoreCase(piece)) continue;
+                boolean isOpponentPiece = mid.equalsIgnoreCase("w") != isWhite;
+                if (isOpponentPiece) return true;
+            }
+        }
+        return false;
     }
 
     private void validateCoordinates(int r, int c) {
@@ -153,84 +186,94 @@ public class MoveService {
         }
     }
 
-    private List<int[]> findCapturePath(String[][] board, int r, int c,
-                                        int destR, int destC, String piece) {
-        return dfs(board, r, c, destR, destC, piece, new HashSet<>());
+    private void validateManSimpleMove(int dr, int dc, boolean isWhite) {
+        if (Math.abs(dr) != 1 || Math.abs(dc) != 1) {
+            throw new InvalidMoveException("Invalid simple move for man.");
+        }
+        if ((isWhite && dr != -1) || (!isWhite && dr != 1)) {
+            throw new InvalidMoveException("Man can only move forward.");
+        }
     }
 
-    private List<int[]> dfs(String[][] board, int r, int c,
-                            int destR, int destC, String piece,
-                            Set<String> used) {
-        if (r == destR && c == destC) {
-            return new ArrayList<>();
+    private void validateKingSimpleMove(String[][] board, int dr, int dc) {
+        if (Math.abs(dr) != Math.abs(dc) || dr == 0) {
+            throw new InvalidMoveException("Invalid simple move for king.");
         }
-        char pchar = piece.charAt(0);
-        // Directions: four diagonals
-        int[][] dirs = new int[][]{{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
-
-        for (int[] d : dirs) {
-            int dr = d[0], dc = d[1];
-            if (Character.isUpperCase(pchar)) {
-                // King: can capture at any distance
-                // scan for opponent piece along direction
-                for (int step = 1; ; step++) {
-                    int midR = r + step * dr;
-                    int midC = c + step * dc;
-                    if (midR < 0 || midR > 7 || midC < 0 || midC > 7) break;
-                    String cap = board[midR][midC];
-                    if (cap.isEmpty()) continue;
-                    if (cap.equalsIgnoreCase(piece)) break; // own piece
-                    // opponent piece found
-                    // try landing positions beyond
-                    for (int landStep = 1; ; landStep++) {
-                        int landR = midR + landStep * dr;
-                        int landC = midC + landStep * dc;
-                        if (landR < 0 || landR > 7 || landC < 0 || landC > 7) break;
-                        if (!board[landR][landC].isEmpty()) break; // blocked
-                        String key = midR + "," + midC + "->" + landR + "," + landC;
-                        if (used.contains(key)) continue;
-                        used.add(key);
-                        List<int[]> path = dfs(board, landR, landC, destR, destC, piece, used);
-                        if (path != null) {
-                            List<int[]> full = new ArrayList<>();
-                            full.add(new int[]{midR, midC});
-                            full.addAll(path);
-                            return full;
-                        }
-                        used.remove(key);
-                    }
-                    // only first opponent can be captured
-                    break;
-                }
-            } else {
-                // Man: only adjacent capture
-                int midR = r + dr;
-                int midC = c + dc;
-                int landR = r + 2 * dr;
-                int landC = c + 2 * dc;
-                if (landR < 0 || landR > 7 || landC < 0 || landC > 7) continue;
-                String cap = board[midR][midC];
-                if (cap.isEmpty() || cap.equalsIgnoreCase(piece)) continue;
-                if (!board[landR][landC].isEmpty()) continue;
-                String key = midR + "," + midC + "->" + landR + "," + landC;
-                if (used.contains(key)) continue;
-                used.add(key);
-                List<int[]> path = dfs(board, landR, landC, destR, destC, piece, used);
-                if (path != null) {
-                    List<int[]> full = new ArrayList<>();
-                    full.add(new int[]{midR, midC});
-                    full.addAll(path);
-                    return full;
-                }
-                used.remove(key);
+        int stepR = dr / Math.abs(dr);
+        int stepC = dc / Math.abs(dc);
+        for (int i = 1; i < Math.abs(dr); i++) {
+            if (!board[stepR * i + (stepR < 0 ? -stepR : 0)][stepC * i + (stepC < 0 ? -stepC : 0)].isEmpty()) {
+                throw new InvalidMoveException("Path is blocked for king move.");
             }
         }
-        return null;
     }
 
-    /**
-     * Controlla se il team ha almeno una mossa (semplice o cattura).
-     */
+    private void removePiece(String[][] board, int r, int c, Game game) {
+        String cap = board[r][c];
+        board[r][c] = "";
+        boolean wasWhite = cap.equalsIgnoreCase("w");
+        boolean wasKing = Character.isUpperCase(cap.charAt(0));
+        if (wasWhite) {
+            if (wasKing) game.setDamaW(game.getDamaW() - 1);
+            else game.setPedineW(game.getPedineW() - 1);
+        } else {
+            if (wasKing) game.setDamaB(game.getDamaB() - 1);
+            else game.setPedineB(game.getPedineB() - 1);
+        }
+    }
+
+    private boolean hasAnyCaptures(String[][] board, Team team) {
+        for (int r = 0; r < 8; r++) {
+            for (int c = 0; c < 8; c++) {
+                String cell = board[r][c];
+                if (cell.isEmpty()) continue;
+                boolean isWhite = cell.equalsIgnoreCase("w");
+                if ((team == Team.WHITE) != isWhite) continue;
+
+                boolean isPieceKing = Character.isUpperCase(cell.charAt(0));
+                int[][] dirs;
+
+                if (!isPieceKing) {
+                    int forwardDir = isWhite ? -1 : 1;
+                    dirs = new int[][]{{forwardDir, 1}, {forwardDir, -1}};
+                } else {
+                    dirs = new int[][]{{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+                }
+
+                for (int[] d : dirs) {
+                    int mr = r + d[0], mc = c + d[1];
+                    int nr = r + 2 * d[0], nc = c + 2 * d[1];
+                    if (mr < 0 || mr > 7 || mc < 0 || mc > 7 || nr < 0 || nr > 7 || nc < 0 || nc > 7) continue;
+                    if (!board[nr][nc].isEmpty()) continue;
+
+                    String mid = board[mr][mc];
+                    if (mid.isEmpty()) continue;
+
+                    boolean midIsWhite = mid.equalsIgnoreCase("w");
+                    if (isWhite != midIsWhite) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private void checkEndGame(Game game) {
+        int totalW = game.getPedineW() + game.getDamaW();
+        int totalB = game.getPedineB() + game.getDamaB();
+        if (totalW == 0) {
+            game.setPartitaTerminata(true);
+            game.setVincitore(Team.BLACK);
+        } else if (totalB == 0) {
+            game.setPartitaTerminata(true);
+            game.setVincitore(Team.WHITE);
+        } else if (!hasAnyMoves(game.getBoard(), game.getTurno())) {
+            game.setPartitaTerminata(true);
+            game.setVincitore(game.getTurno() == Team.WHITE ? Team.BLACK : Team.WHITE);
+        }
+    }
+
     private boolean hasAnyMoves(String[][] board, Team team) {
         for (int r = 0; r < 8; r++) {
             for (int c = 0; c < 8; c++) {
@@ -238,28 +281,22 @@ public class MoveService {
                 if (cell.isEmpty()) continue;
                 boolean isWhite = cell.equalsIgnoreCase("w");
                 if ((team == Team.WHITE) != isWhite) continue;
-                // Cattura possibile?
-                if (findCapturePath(board, r, c, r, c, cell) != null
-                        && !findCapturePath(board, r, c, r, c, cell).isEmpty()) {
-                    return true;
-                }
-                // Mossa semplice possibile?
-                if (Character.isUpperCase(cell.charAt(0))) {
-                    // Dama: diagonale libera di almeno 1 passo
-                    int[][] dirs = {{1,1},{1,-1},{-1,1},{-1,-1}};
-                    for (int[] d: dirs) {
+
+                if (hasAnyCaptures(board, team)) return true;
+
+                boolean isKing = Character.isUpperCase(cell.charAt(0));
+                if (isKing) {
+                    int[][] dirs = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+                    for (int[] d : dirs) {
                         int nr = r + d[0], nc = c + d[1];
-                        if (nr<0||nr>7||nc<0||nc>7) continue;
-                        if (board[nr][nc].isEmpty()) return true;
+                        if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8 && board[nr][nc].isEmpty()) return true;
                     }
                 } else {
-                    // Uomo: una mossa avanti
                     int dr = isWhite ? -1 : 1;
-                    int[][] forward = {{dr,1},{dr,-1}};
-                    for (int[] d: forward) {
+                    int[][] dirs = {{dr, 1}, {dr, -1}};
+                    for (int[] d : dirs) {
                         int nr = r + d[0], nc = c + d[1];
-                        if (nr<0||nr>7||nc<0||nc>7) continue;
-                        if (board[nr][nc].isEmpty()) return true;
+                        if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8 && board[nr][nc].isEmpty()) return true;
                     }
                 }
             }
