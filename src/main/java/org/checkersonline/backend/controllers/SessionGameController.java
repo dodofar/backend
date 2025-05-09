@@ -10,6 +10,7 @@ import org.checkersonline.backend.model.dtos.MoveDto;
 import org.checkersonline.backend.model.dtos.PlayerDto;
 import org.checkersonline.backend.model.dtos.mappers.GameMapper;
 import org.checkersonline.backend.model.dtos.services.GameService;
+import org.checkersonline.backend.model.dtos.services.MessageDto;
 import org.checkersonline.backend.model.dtos.services.MoveService;
 import org.checkersonline.backend.model.entities.Game;
 import org.checkersonline.backend.model.entities.Player;
@@ -114,6 +115,11 @@ public class SessionGameController {
             System.out.println("Players or session not found on session id: " +id);
         }
     }
-
+    @PostMapping("/{id}/chat")
+    public void chat(@PathVariable String id, @RequestBody MessageDto message) {
+        Game g = gameDao.findById(id).orElseThrow(() -> new SessionGameNotFoundException(id));
+        g.setChat(g.getChat() + "<b>" + message.player() + "</b>" + ": " + message.text() + "\n");
+        gameDao.save(g);
+    }
 
 }
