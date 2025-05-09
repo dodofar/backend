@@ -68,17 +68,22 @@ public class MoveService {
         boolean isCapture = captured != null && !captured.isEmpty();
 
         if (isCapture) {
-            // Rimuovo tutte le pedine intercettate
+            Set<String> seen = new HashSet<>();
             for (int[] pos : captured) {
+                String key = pos[0] + "," + pos[1];
+                if (!seen.add(key)) {
+                    // già rimosso prima, skip
+                    continue;
+                }
                 int r = pos[0], c = pos[1];
                 String cap = board[r][c];
                 board[r][c] = "";
                 if (cap.equalsIgnoreCase("w")) {
-                    if (cap.equals("w")) game.setPedineW(game.getPedineW() - 1);
-                    else                game.setDamaW(game.getDamaW() - 1);
+                    if (cap.equals("w"))      game.setPedineW(game.getPedineW() - 1);
+                    else                      game.setDamaW (game.getDamaW()  - 1);
                 } else {
-                    if (cap.equals("b")) game.setPedineB(game.getPedineB() - 1);
-                    else                game.setDamaB(game.getDamaB() - 1);
+                    if (cap.equals("b"))      game.setPedineB(game.getPedineB() - 1);
+                    else                      game.setDamaB (game.getDamaB()  - 1);
                 }
             }
         } else {
@@ -122,9 +127,19 @@ public class MoveService {
         }
         board[toR][toC] = piece;
 
-        // 4) Cambio turno
-        Team opponent = (player == Team.WHITE ? Team.BLACK : Team.WHITE);
-        game.setTurno(opponent);
+        // 4) Cambio turno solo se non ci sono ulteriori mangiate possibili
+        boolean canCaptureAgain = false;
+        if (isCapture) {
+            // Verifica se dalla nuova posizione è possibile effettuare altre mangiate
+            List<int[]> furtherCaptures = hasCaptureMoves(board, toR, toC, piece);
+            canCaptureAgain = furtherCaptures != null && !furtherCaptures.isEmpty();
+        }
+        
+        if (!canCaptureAgain) {
+            // Cambio turno solo se non ci sono più mangiate possibili
+            Team opponent = (player == Team.WHITE ? Team.BLACK : Team.WHITE);
+            game.setTurno(opponent);
+        }
 
         // 5) Controllo fine partita per mancanza pedine
         if (game.getPedineW() + game.getDamaW() == 0) {
@@ -136,15 +151,16 @@ public class MoveService {
             game.setVincitore(Team.WHITE);
         }
 
-        // 6) **Nuovo**: controllo se l’opponente ha mosse valide
-        if (!game.isPartitaTerminata() && !hasAnyMoves(board, opponent)) {
+        // 6) **Nuovo**: controllo se l'opponente ha mosse valide
+        // Modifica: controllo solo se abbiamo effettivamente cambiato turno
+        Team nextPlayer = game.getTurno();
+        if (!game.isPartitaTerminata() && nextPlayer != player && !hasAnyMoves(board, nextPlayer)) {
             game.setPartitaTerminata(true);
             game.setVincitore(player);
         }
 
         // Se la mossa include una cattura e include un percorso di cattura (quindi fa più di una mossa)
         if (captured != null && !captured.isEmpty()) {
-
             // Posizione iniziale
             int currentR = fromR;
             int currentC = fromC;
@@ -174,6 +190,64 @@ public class MoveService {
         }
 
         return gameDao.save(game);
+    }
+
+    /**
+     * Verifica se dalla posizione data ci sono mosse di cattura disponibili
+     */
+    private List<int[]> hasCaptureMoves(String[][] board, int r, int c, String piece) {
+        char pchar = piece.charAt(0);
+        int[][] dirs = new int[][]{{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+        List<int[]> possibleCaptures = new ArrayList<>();
+
+        for (int[] d : dirs) {
+            int dr = d[0], dc = d[1];
+            
+            if (Character.isUpperCase(pchar)) {
+                // Logica per la Dama
+                for (int step = 1; ; step++) {
+                    int midR = r + step * dr;
+                    int midC = c + step * dc;
+                    if (midR < 0 || midR > 7 || midC < 0 || midC > 7) break;
+                    String cap = board[midR][midC];
+                    if (cap.isEmpty()) continue;
+                    if (cap.equalsIgnoreCase(piece)) break;
+
+                    for (int landStep = 1; ; landStep++) {
+                        int landR = midR + landStep * dr;
+                        int landC = midC + landStep * dc;
+                        if (landR < 0 || landR > 7 || landC < 0 || landC > 7) break;
+                        if (!board[landR][landC].isEmpty()) break;
+                        
+                        // Trovata possibile cattura
+                        possibleCaptures.add(new int[]{midR, midC});
+                        break;
+                    }
+                    break;
+                }
+            } else {
+                // Logica per pedina normale
+                // Regole italiane: le pedine normali possono mangiare solo in avanti
+                if ((piece.equals("w") && dr >= 0) || (piece.equals("b") && dr <= 0)) {
+                    continue; // Salta direzioni non valide secondo le regole italiane
+                }
+                
+                int midR = r + dr;
+                int midC = c + dc;
+                int landR = r + 2 * dr;
+                int landC = c + 2 * dc;
+                
+                if (landR < 0 || landR > 7 || landC < 0 || landC > 7) continue;
+                String cap = board[midR][midC];
+                if (cap.isEmpty() || cap.equalsIgnoreCase(piece)) continue;
+                if (!board[landR][landC].isEmpty()) continue;
+                
+                // Trovata possibile cattura
+                possibleCaptures.add(new int[]{midR, midC});
+            }
+        }
+        
+        return possibleCaptures;
     }
 
     private void validateCoordinates(int r, int c) {
@@ -234,6 +308,11 @@ public class MoveService {
                 }
             } else {
                 // Logica per pedina normale
+                // Regole italiane: le pedine normali possono mangiare solo in avanti
+                if ((piece.equals("w") && dr >= 0) || (piece.equals("b") && dr <= 0)) {
+                    continue; // Salta direzioni non valide secondo le regole italiane
+                }
+                
                 int midR = r + dr;
                 int midC = c + dc;
                 int landR = r + 2 * dr;
